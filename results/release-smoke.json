@@ -1,0 +1,273 @@
+{
+  "weight_sha256": "392e8d466d56100ada00eb82031fb854297fc9e389b7d303eba3af114e87bce2",
+  "context": 4096,
+  "parallel_repetitions": 1,
+  "max_tokens": 12,
+  "trials": [
+    {
+      "round": 1,
+      "mode": "stock",
+      "cases": {
+        "parallel_chat_forks": [
+          {
+            "first_text_ms": 399.17504099867074,
+            "total_ms": 751.975791004952,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "21 days."
+          },
+          {
+            "first_text_ms": 148.17141700041248,
+            "total_ms": 751.5361249970738,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2389,
+            "output_tokens": 5,
+            "text": "21 days."
+          },
+          {
+            "first_text_ms": 398.82208299968624,
+            "total_ms": 751.6062499998952,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "29 days."
+          },
+          {
+            "first_text_ms": 398.56295799836516,
+            "total_ms": 751.8590000036056,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "20 days."
+          },
+          {
+            "first_text_ms": 429.75666600250406,
+            "total_ms": 706.4946659957059,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "21 days."
+          },
+          {
+            "first_text_ms": 429.5384159995592,
+            "total_ms": 617.7850000021863,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 3,
+            "text": "22"
+          },
+          {
+            "first_text_ms": 429.5267080015037,
+            "total_ms": 617.9675000021234,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 3,
+            "text": "23"
+          },
+          {
+            "first_text_ms": 429.08149999857415,
+            "total_ms": 706.0337499933667,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "24 days."
+          },
+          {
+            "first_text_ms": 256.11354099964956,
+            "total_ms": 670.996415996342,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 3,
+            "text": "25"
+          },
+          {
+            "first_text_ms": 255.487082999025,
+            "total_ms": 774.4633749971399,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "21 days."
+          },
+          {
+            "first_text_ms": 331.02720900205895,
+            "total_ms": 686.4057499988121,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "21 days."
+          },
+          {
+            "first_text_ms": 330.76024999900255,
+            "total_ms": 582.4277919964516,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 3,
+            "text": "23"
+          }
+        ]
+      },
+      "log": "01-stock.log",
+      "case_duration_ms": {
+        "parallel_chat_forks": 2145.5305829949793
+      },
+      "mlx_peak_allocated_bytes": 5951676724,
+      "mlx_memory_guideline_bytes": 6442450944,
+      "grouped_prefill_widths": [],
+      "compact_prefills": 0,
+      "coalesced_prefill_widths": [],
+      "pool": {
+        "active_slots": 8192,
+        "allocated_slots": 8193,
+        "dtype": "bfloat16",
+        "bytes": 939638784
+      }
+    },
+    {
+      "round": 1,
+      "mode": "coalesced",
+      "cases": {
+        "parallel_chat_forks": [
+          {
+            "first_text_ms": 127.0877919960185,
+            "total_ms": 327.7000419984688,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "21 days."
+          },
+          {
+            "first_text_ms": 127.022874999966,
+            "total_ms": 327.7305840019835,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "21 days."
+          },
+          {
+            "first_text_ms": 41.979624998930376,
+            "total_ms": 326.75216699863086,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2389,
+            "output_tokens": 5,
+            "text": "29 days."
+          },
+          {
+            "first_text_ms": 126.5186669988907,
+            "total_ms": 327.3512500018114,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "20 days."
+          },
+          {
+            "first_text_ms": 103.1074999991688,
+            "total_ms": 259.0266250044806,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "21 days."
+          },
+          {
+            "first_text_ms": 102.66183400381124,
+            "total_ms": 235.47166700154776,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 3,
+            "text": "22"
+          },
+          {
+            "first_text_ms": 102.5542499992298,
+            "total_ms": 235.96020900004078,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 3,
+            "text": "23"
+          },
+          {
+            "first_text_ms": 38.74066699791001,
+            "total_ms": 258.3615830008057,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "24 days."
+          },
+          {
+            "first_text_ms": 66.50887500290992,
+            "total_ms": 212.41841700248187,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 3,
+            "text": "25"
+          },
+          {
+            "first_text_ms": 66.07937499938998,
+            "total_ms": 241.32437499793014,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "21 days."
+          },
+          {
+            "first_text_ms": 106.05691700038733,
+            "total_ms": 218.99449999909848,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 5,
+            "text": "21 days."
+          },
+          {
+            "first_text_ms": 105.82004099705955,
+            "total_ms": 189.52666599943768,
+            "prompt_tokens": 2401,
+            "cached_tokens": 2390,
+            "output_tokens": 3,
+            "text": "23"
+          }
+        ]
+      },
+      "log": "01-coalesced.log",
+      "case_duration_ms": {
+        "parallel_chat_forks": 806.2044999969658
+      },
+      "mlx_peak_allocated_bytes": 5037678764,
+      "mlx_memory_guideline_bytes": 6442450944,
+      "grouped_prefill_widths": [],
+      "compact_prefills": 10,
+      "coalesced_prefill_widths": [
+        3,
+        3,
+        2,
+        2
+      ],
+      "pool": {
+        "active_slots": 8192,
+        "allocated_slots": 8193,
+        "dtype": "bfloat16",
+        "bytes": 939638784
+      }
+    }
+  ],
+  "comparisons": [
+    {
+      "mode": "coalesced",
+      "scenario": "parallel_chat_forks",
+      "paired_trials": [
+        {
+          "round": 1,
+          "stock_ms": 2145.5305829949793,
+          "candidate_ms": 806.2044999969658,
+          "reduction_pct": 62.42400334971816,
+          "stock_first_text_median_ms": 398.6925204990257,
+          "candidate_first_text_median_ms": 102.88466700149002,
+          "stock_first_text_p95_ms": 429.75666600250406,
+          "candidate_first_text_p95_ms": 127.0877919960185
+        }
+      ],
+      "paired_median_reduction_pct": 62.42400334971816,
+      "wins": 1,
+      "first_text_median_wins": 1
+    }
+  ],
+  "output_differences": []
+}

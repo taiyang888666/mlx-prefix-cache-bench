@@ -1,0 +1,40 @@
+CINFER_MEMORY_GUIDELINE bytes=6442450944
+CINFER_EXTEND_EVAL batch=1 enqueue_ms=86.784
+CINFER_EXTEND batch=1 prefixes=[0] tails=[6] queue_ms=[0.995] build_ms=89.143 finalize_ms=5.918 forward_ms=95.307
+Cache flushed successfully!
+CINFER_EXTEND_EVAL batch=1 enqueue_ms=90.226
+CINFER_EXTEND batch=1 prefixes=[0] tails=[20] queue_ms=[0.566] build_ms=91.580 finalize_ms=4.487 forward_ms=96.255
+CINFER_MLX_PEAK bytes=1763541920
+CINFER_EXTEND_EVAL batch=1 enqueue_ms=455.163
+CINFER_EXTEND batch=1 prefixes=[1] tails=[2048] queue_ms=[0.415] build_ms=456.425 finalize_ms=54.311 forward_ms=510.937
+CINFER_EXTEND_EVAL batch=1 enqueue_ms=39.296
+CINFER_EXTEND batch=1 prefixes=[2049] tails=[352] queue_ms=[512.117] build_ms=40.884 finalize_ms=96.945 forward_ms=138.023
+CINFER_MLX_PEAK bytes=3079731828
+CINFER_PREFILL_DETAIL prefix=2389 tail=12 setup_ms=0.083 model_graph_ms=0.600 cache_graph_ms=0.100 write_graph_ms=0.173
+CINFER_EXTEND_EVAL batch=1 enqueue_ms=59.082
+CINFER_EXTEND batch=1 prefixes=[2389] tails=[12] queue_ms=[0.475] build_ms=60.384 finalize_ms=4.546 forward_ms=65.571
+CINFER_PREFILL_DETAIL prefix=2390 tail=11 setup_ms=0.092 model_graph_ms=0.558 cache_graph_ms=0.168 write_graph_ms=0.162
+CINFER_PREFILL_DETAIL prefix=2390 tail=11 setup_ms=0.049 model_graph_ms=0.513 cache_graph_ms=0.176 write_graph_ms=0.162
+CINFER_PREFILL_DETAIL prefix=2390 tail=11 setup_ms=0.042 model_graph_ms=0.451 cache_graph_ms=0.149 write_graph_ms=0.174
+CINFER_EXTEND_EVAL batch=3 enqueue_ms=112.556
+CINFER_EXTEND batch=3 prefixes=[2390, 2390, 2390] tails=[11, 11, 11] queue_ms=[5.783, 5.754, 5.737] build_ms=116.116 finalize_ms=1.629 forward_ms=118.136
+CINFER_MLX_PEAK bytes=3738779994
+CINFER_PREFILL_DETAIL prefix=2390 tail=11 setup_ms=0.079 model_graph_ms=0.645 cache_graph_ms=0.116 write_graph_ms=0.212
+CINFER_EXTEND_EVAL batch=1 enqueue_ms=24.814
+CINFER_EXTEND batch=1 prefixes=[2390] tails=[11] queue_ms=[0.715] build_ms=26.215 finalize_ms=6.597 forward_ms=33.230
+CINFER_PREFILL_DETAIL prefix=2390 tail=11 setup_ms=0.062 model_graph_ms=0.523 cache_graph_ms=0.166 write_graph_ms=0.160
+CINFER_PREFILL_DETAIL prefix=2390 tail=11 setup_ms=0.038 model_graph_ms=0.429 cache_graph_ms=0.147 write_graph_ms=0.149
+CINFER_PREFILL_DETAIL prefix=2390 tail=11 setup_ms=0.036 model_graph_ms=0.425 cache_graph_ms=0.149 write_graph_ms=0.187
+CINFER_EXTEND_EVAL batch=3 enqueue_ms=137.973
+CINFER_EXTEND batch=3 prefixes=[2390, 2390, 2390] tails=[11, 11, 11] queue_ms=[7.84, 7.809, 7.79] build_ms=141.381 finalize_ms=0.246 forward_ms=142.005
+CINFER_MLX_PEAK bytes=5127618892
+CINFER_MLX_PEAK bytes=5951676724
+CINFER_PREFILL_DETAIL prefix=2390 tail=11 setup_ms=0.044 model_graph_ms=0.551 cache_graph_ms=0.099 write_graph_ms=0.168
+CINFER_PREFILL_DETAIL prefix=2390 tail=11 setup_ms=0.036 model_graph_ms=0.429 cache_graph_ms=0.089 write_graph_ms=0.176
+CINFER_EXTEND_EVAL batch=2 enqueue_ms=46.064
+CINFER_EXTEND batch=2 prefixes=[2390, 2390] tails=[11, 11] queue_ms=[4.841, 4.773] build_ms=48.018 finalize_ms=10.949 forward_ms=59.366
+CINFER_PREFILL_DETAIL prefix=2390 tail=11 setup_ms=0.070 model_graph_ms=0.729 cache_graph_ms=0.102 write_graph_ms=0.162
+CINFER_PREFILL_DETAIL prefix=2390 tail=11 setup_ms=0.050 model_graph_ms=0.439 cache_graph_ms=0.087 write_graph_ms=0.151
+CINFER_EXTEND_EVAL batch=2 enqueue_ms=44.158
+CINFER_EXTEND batch=2 prefixes=[2390, 2390] tails=[11, 11] queue_ms=[12.395, 12.369] build_ms=46.261 finalize_ms=10.679 forward_ms=57.082
+Cache flushed successfully!

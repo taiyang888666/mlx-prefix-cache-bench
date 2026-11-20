@@ -1,0 +1,898 @@
+diff --git a/python/sglang/srt/hardware_backend/mlx/kv_cache/attention_kv_cache.py b/python/sglang/srt/hardware_backend/mlx/kv_cache/attention_kv_cache.py
+index 78f371b..aef9e37 100644
+--- a/python/sglang/srt/hardware_backend/mlx/kv_cache/attention_kv_cache.py
++++ b/python/sglang/srt/hardware_backend/mlx/kv_cache/attention_kv_cache.py
+@@ -1,3 +1,4 @@
++# Modified by the 云清启 technical team for the MLX prefix-cache benchmark.
+ """Attention KV cache adapters for the MLX backend."""
+ 
+ from __future__ import annotations
+@@ -69,7 +70,7 @@ class ContiguousAttentionKVCache:
+     instead of ``mx.concatenate``.  Lazy-allocated on first write.
+     """
+ 
+-    __slots__ = ("keys", "values", "offset", "max_seq_len")
++    __slots__ = ("keys", "values", "offset", "max_seq_len", "_compact")
+ 
+     def __init__(
+         self,
+@@ -86,6 +87,13 @@ class ContiguousAttentionKVCache:
+             self.values = None
+         self.offset = 0
+         self.max_seq_len = max_seq_len
++        self._compact = False
++
++    def adopt_compact(self, keys: mx.array, values: mx.array) -> None:
++        """Use the exact forward-pass KV directly until the first append."""
++        self.keys, self.values = keys, values
++        self.max_seq_len = self.offset = keys.shape[2]
++        self._compact = True
+ 
+     def make_mask(self, N, return_array=False, window_size=None, **kwargs):
+         return make_attention_mask(
+@@ -132,6 +140,22 @@ class ContiguousAttentionKVCache:
+             self._allocate(keys)
+         S = keys.shape[2]
+         end = self.offset + S
++        if self._compact and S:
++            # This append has to copy the shared prefix once. Join the new
++            # rows and decode slack in the same operation to avoid zero-fill
++            # followed by two read/modify/write slice assignments.
++            capacity = (end + 32 + 127) // 128 * 128
++            slack = (keys.shape[0], keys.shape[1], capacity - end, keys.shape[3])
++            self.keys = mx.concatenate(
++                [self.keys, keys, mx.zeros(slack, dtype=keys.dtype)], axis=2
++            )
++            self.values = mx.concatenate(
++                [self.values, values, mx.zeros(slack, dtype=values.dtype)], axis=2
++            )
++            self.max_seq_len = capacity
++            self.offset = end
++            self._compact = False
++            return self.keys[:, :, :end, :], self.values[:, :, :end, :]
+         if end > self.max_seq_len:
+             self._grow(end)
+         self.keys[:, :, self.offset : end, :] = keys
+@@ -141,6 +165,9 @@ class ContiguousAttentionKVCache:
+ 
+     def write_token(self, k: mx.array, v: mx.array) -> None:
+         """Write one token. k, v shape: (1, n_kv_heads, 1, head_dim)."""
++        if self._compact:
++            self.update_and_fetch(k, v)
++            return
+         end = self.offset + 1
+         if end > self.max_seq_len:
+             self._grow(end)
+@@ -162,6 +189,9 @@ class ContiguousAttentionKVCache:
+ 
+     def reset(self) -> None:
+         """Reset for reuse, keeping allocated buffers."""
++        if self._compact:
++            self.keys = self.values = None
++            self._compact = False
+         self.offset = 0
+ 
+ 
+@@ -294,7 +324,7 @@ class PoolBackedAttentionKVCache:
+         self,
+         pool: MlxAttentionKVPool,
+         layer_idx: int,
+-        slots: mx.array,
++        slots: mx.array | slice,
+         prefix_len: int,
+     ):
+         self._pool = pool
+@@ -332,9 +362,12 @@ class PoolBackedAttentionKVCache:
+         S = keys.shape[2]
+ 
+         if self.offset > 0:
+-            k_cached, v_cached = self._pool.get_kv(
+-                self._layer_idx, self._slots[: self.offset]
++            slots = (
++                slice(self._slots.start, self._slots.start + self.offset)
++                if isinstance(self._slots, slice)
++                else self._slots[: self.offset]
+             )
++            k_cached, v_cached = self._pool.get_kv(self._layer_idx, slots)
+             # Pool layout (S, n_kv_heads, head_dim) → cache (1, n_kv_heads, S, head_dim)
+             k_cached = k_cached.transpose(1, 0, 2)[None]
+             v_cached = v_cached.transpose(1, 0, 2)[None]
+diff --git a/python/sglang/srt/hardware_backend/mlx/kv_cache/attention_kv_pool.py b/python/sglang/srt/hardware_backend/mlx/kv_cache/attention_kv_pool.py
+index 6706965..83b75ea 100644
+--- a/python/sglang/srt/hardware_backend/mlx/kv_cache/attention_kv_pool.py
++++ b/python/sglang/srt/hardware_backend/mlx/kv_cache/attention_kv_pool.py
+@@ -1,3 +1,4 @@
++# Modified by the 云清启 technical team for the MLX prefix-cache benchmark.
+ """Flat attention KV pool for the MLX backend.
+ 
+ Each layer buffer has shape ``(pool_size, n_kv_heads, head_dim)``.
+@@ -16,6 +17,15 @@ import mlx.core as mx
+ logger = logging.getLogger(__name__)
+ 
+ 
++def consecutive_slots(slot_ids: list[int]) -> slice | None:
++    """Describe a single ordered run without allocating index tensors."""
++    if slot_ids and all(
++        slot == slot_ids[0] + index for index, slot in enumerate(slot_ids)
++    ):
++        return slice(slot_ids[0], slot_ids[0] + len(slot_ids))
++    return None
++
++
+ class MlxAttentionKVPool:
+     """Pre-allocated attention KV pool indexed by integer slot IDs."""
+ 
+@@ -52,12 +62,14 @@ class MlxAttentionKVPool:
+             f"dtype={dtype}, ~{mem_mb:.1f} MB"
+         )
+ 
+-    def set_kv(self, layer_id: int, slots: mx.array, k: mx.array, v: mx.array) -> None:
++    def set_kv(
++        self, layer_id: int, slots: mx.array | slice, k: mx.array, v: mx.array
++    ) -> None:
+         """Scatter K/V into *slots* for one layer."""
+         self.k_buffer[layer_id][slots] = k
+         self.v_buffer[layer_id][slots] = v
+ 
+-    def get_kv(self, layer_id: int, slots: mx.array) -> tuple[mx.array, mx.array]:
++    def get_kv(self, layer_id: int, slots: mx.array | slice) -> tuple[mx.array, mx.array]:
+         """Gather K/V from *slots* for one layer."""
+         return self.k_buffer[layer_id][slots], self.v_buffer[layer_id][slots]
+ 
+diff --git a/python/sglang/srt/hardware_backend/mlx/model_runner.py b/python/sglang/srt/hardware_backend/mlx/model_runner.py
+index 90d7469..61be7c9 100644
+--- a/python/sglang/srt/hardware_backend/mlx/model_runner.py
++++ b/python/sglang/srt/hardware_backend/mlx/model_runner.py
+@@ -1,3 +1,4 @@
++# Modified by the 云清启 technical team for the MLX prefix-cache benchmark.
+ """MLX model runner for Apple Silicon.
+ 
+ Slot allocation and radix-trie prefix matching are handled by the
+@@ -24,6 +25,7 @@ state.
+ """
+ 
+ import logging
++import os
+ import time
+ from dataclasses import dataclass
+ from typing import Any
+@@ -58,6 +60,7 @@ from sglang.srt.hardware_backend.mlx.kv_cache import (
+     set_context,
+     uses_sliding_window_attention,
+ )
++from sglang.srt.hardware_backend.mlx.kv_cache.attention_kv_pool import consecutive_slots
+ from sglang.srt.hardware_backend.mlx.remote_code_gate import (
+     ensure_remote_code_allowed,
+     resolve_model_directory,
+@@ -81,6 +84,7 @@ from sglang.srt.runtime_context import (
+ )
+ 
+ logger = logging.getLogger(__name__)
++_PROFILE_PREFILL = os.environ.get("CINFER_PROFILE_EXTEND") == "1"
+ 
+ 
+ @dataclass
+@@ -100,6 +104,8 @@ class MlxPendingPrefill:
+     req_pool_idx: int
+     synced_offset: int
+     lazy_logprobs: MlxLazyLogprobs | None = None
++    # The compact Qwen3 cache uses the same K/V arrays consumed by attention.
++    cache_in_token_graph: bool = False
+ 
+ 
+ @dataclass
+@@ -161,6 +167,11 @@ class MlxModelRunner:
+     _enable_sampling = False
+     _sanitize_nan = False
+     _deterministic_seeding = False
++    _optimize_kv_layout = False
++    _last_position_head = None
++    _memory_budget = 0
++    _compact_warm_prefill = False
++    coalesce_prefill_writes = False
+ 
+     def __init__(
+         self,
+@@ -201,6 +212,19 @@ class MlxModelRunner:
+         # mlx_lm.load() detects the config and instantiates QuantizedLinear
+         # modules directly.
+         self._quantization: str | None = quantization
++        native_variant = os.environ.get("CINFER_MLX_VARIANT", "stock")
++        if native_variant not in ("stock", "readout", "layout", "both", "compact", "coalesced"):
++            raise ValueError(f"Unknown MLX research variant: {native_variant}")
++        self._optimize_kv_layout = native_variant in ("layout", "both", "compact", "coalesced")
++        self._compact_warm_prefill = native_variant == "compact"
++        self._last_position_head = None
++        self._memory_budget = int(os.environ.get("CINFER_MLX_MEMORY_BYTES", "0"))
++        if self._memory_budget < 0:
++            raise ValueError("CINFER_MLX_MEMORY_BYTES must be nonnegative")
++        self._reported_peak = 0
++        if self._memory_budget:
++            mx.set_memory_limit(self._memory_budget)
++            logger.info("CINFER_MEMORY_GUIDELINE bytes=%d", self._memory_budget)
+ 
+         # Optionally cap the buffer cache (recycled GPU buffers). MLX never
+         # returns freed buffers to the OS, so without a cap the process
+@@ -216,6 +240,24 @@ class MlxModelRunner:
+             logger.info(f"MLX buffer cache limit set to {cache_limit_gb:.1f} GB")
+ 
+         self._load_model()
++        if native_variant in ("readout", "both", "compact", "coalesced"):
++            from mlx_lm.models.qwen3 import Model as Qwen3Model
++
++            if type(self.model) is Qwen3Model:
++                self._last_position_head = (
++                    self.model.model.embed_tokens.as_linear
++                    if self.model.args.tie_word_embeddings
++                    else self.model.lm_head
++                )
++            logger.info(
++                "CINFER_READOUT enabled=%s", self._last_position_head is not None
++            )
++
++        self.coalesce_prefill_writes = (
++            native_variant == "coalesced"
++            and self._last_position_head is not None
++            and not self.disable_radix_cache
++        )
+ 
+         # Pin MLX allocations to prevent OS paging
+         device_info = mx.device_info()
+@@ -291,26 +333,42 @@ class MlxModelRunner:
+             cache = [None] * self._cache_layout.num_layers
+         return cache
+ 
+-    def _new_native_cache(self) -> list[Any]:
++    def _new_native_cache(self, initial_seq_len: int | None = None) -> list[Any]:
+         """Create a model-shaped cache list with attention KV adapters."""
++        if initial_seq_len is None:
++            initial_seq_len = self._max_seq_len
+         cache = self._new_cache_skeleton()
+         for layer_idx in self._cache_layout.attention_layer_indices:
+             window = self._cache_layout.window_size(layer_idx)
+             cache[layer_idx] = (
+                 WindowedAttentionKVCache(window)
+                 if window is not None
+-                else ContiguousAttentionKVCache(max_seq_len=self._max_seq_len)
++                else ContiguousAttentionKVCache(max_seq_len=initial_seq_len)
+             )
+         return cache
+ 
+-    def _acquire_cache(self) -> list[Any]:
++    def _acquire_cache(self, required_tokens: int = 0) -> list[Any]:
+         """Get a reusable cache list from the pool, or create a new one."""
++        initial_seq_len = self._max_seq_len
++        sized_cache = (
++            self._optimize_kv_layout
++            and required_tokens > 0
++            and not self._cache_layout.has_auxiliary_state
++            and not self._cache_layout.has_sliding_window_layers
++        )
++        if sized_cache:
++            # Keep decode slack without forcing short prompts to allocate 4k entries.
++            initial_seq_len = max(128, (required_tokens + 32 + 127) // 128 * 128)
+         if not self._cache_layout.has_auxiliary_state and self._cache_pool:
+             cache = self._cache_pool.pop()
+-            for c in cache:
+-                c.reset()
+-            return cache
+-        return self._new_native_cache()
++            if not sized_cache or all(
++                initial_seq_len <= layer.max_seq_len <= 2 * initial_seq_len
++                for layer in cache
++            ):
++                for c in cache:
++                    c.reset()
++                return cache
++        return self._new_native_cache(initial_seq_len)
+ 
+     def _release_cache(self, cache: list[Any]) -> None:
+         """Return a cache list to the pool for reuse."""
+@@ -437,24 +495,33 @@ class MlxModelRunner:
+         recompute instead), so every attention layer here is pool-backed.
+         """
+         assert self._attention_kv_pool is not None
+-        slot_ids_mx = mx.array(prefix_slot_ids, dtype=mx.int32)
++        slots = consecutive_slots(prefix_slot_ids) if self._optimize_kv_layout else None
++        if slots is None:
++            slots = mx.array(prefix_slot_ids, dtype=mx.int32)
+         cache = self._new_cache_skeleton()
+         for layer_idx in self._cache_layout.attention_layer_indices:
+             cache[layer_idx] = PoolBackedAttentionKVCache(
+                 self._attention_kv_pool,
+                 self._cache_layout.full_kv_pool_index(layer_idx),
+-                slot_ids_mx,
++                slots,
+                 prefix_len,
+             )
+         return cache
+ 
+-    def _materialize_pool_backed_attention(self, cache: list[Any]) -> list[Any]:
+-        contiguous_cache = self._acquire_cache()
++    def _materialize_pool_backed_attention(
++        self, cache: list[Any], *, compact: bool = False
++    ) -> list[Any]:
++        contiguous_cache = self._acquire_cache(
++            self._first_attention_cache(cache).offset
++        )
+         for layer_idx in self._cache_layout.attention_layer_indices:
+             pbc = cache[layer_idx]
+-            contiguous_cache[layer_idx].update_and_fetch(
+-                pbc._full_keys, pbc._full_values
+-            )
++            if compact:
++                contiguous_cache[layer_idx].adopt_compact(pbc._full_keys, pbc._full_values)
++            else:
++                contiguous_cache[layer_idx].update_and_fetch(
++                    pbc._full_keys, pbc._full_values
++                )
+         for layer_idx in self._cache_layout.auxiliary_layer_indices:
+             contiguous_cache[layer_idx] = cache[layer_idx]
+         return contiguous_cache
+@@ -823,6 +890,21 @@ class MlxModelRunner:
+             return
+         full_layer_indices = self._cache_layout.full_attention_layer_indices
+         end = cache_start + len(slot_ids)
++        if self._optimize_kv_layout:
++            slots = consecutive_slots(slot_ids)
++            if slots is None:
++                slots = mx.array(slot_ids, dtype=mx.int32)
++            # Pool writes are per-layer operations. Avoid stacking all layers
++            # into temporary tensors just to slice them back into layers.
++            for pool_index, layer_index in enumerate(full_layer_indices):
++                layer = cache[layer_index]
++                self._attention_kv_pool.set_kv(
++                    pool_index,
++                    slots,
++                    layer.keys[0, :, cache_start:end, :].transpose(1, 0, 2),
++                    layer.values[0, :, cache_start:end, :].transpose(1, 0, 2),
++                )
++            return
+         slot_ids_mx = mx.array(slot_ids, dtype=mx.int32)
+         # TODO: Standardize ContiguousAttentionKVCache size to avoid transpose
+         # Transpose cache (1, n_kv_heads, S, head_dim) to pool (S, n_kv_heads, head_dim)
+@@ -897,6 +979,8 @@ class MlxModelRunner:
+         needs_logits: bool = True,
+         logit_edit_row: mx.array | None = None,
+         logprob_spec: MlxLogprobSpec | None = None,
++        pool_writes: list[tuple[list[Any], int, list[int]]] | None = None,
++        prefer_compact_prefill: bool = False,
+     ) -> MlxPendingPrefill:
+         """Queue a prefill forward pass without evaluating.
+ 
+@@ -909,6 +993,8 @@ class MlxModelRunner:
+         (its next-token output is discarded); see :meth:`extend_start`.
+         """
+         prefix_len = len(prefix_slot_ids)
++        profile = _PROFILE_PREFILL and prefix_len >= 256 and len(new_token_ids) <= 32
++        profile_start = time.perf_counter() if profile else 0.0
+         if req is not None:
+             req.kv.mamba_last_track_seqlen = None
+         if self._enable_sampling:
+@@ -921,7 +1007,7 @@ class MlxModelRunner:
+             )
+ 
+         if self.disable_radix_cache:
+-            cache = self._acquire_cache()
++            cache = self._acquire_cache(len(new_token_ids))
+             input_ids = mx.array([new_token_ids], dtype=mx.int32)
+             lazy_token, lazy_logprobs = self._forward_lazy_token(
+                 input_ids, cache, needs_logits, req_id, logit_edit_row, logprob_spec
+@@ -982,7 +1068,7 @@ class MlxModelRunner:
+                 # tree stores state at the match boundary today, so use a
+                 # full-prompt fallback for that edge while still syncing newly
+                 # allocated attention KV below.
+-                cache = self._acquire_cache()
++                cache = self._acquire_cache(len(full_token_ids or new_token_ids))
+                 input_ids = mx.array([full_token_ids or new_token_ids], dtype=mx.int32)
+                 lazy_token, lazy_logprobs = self._forward_lazy_token(
+                     input_ids, cache, needs_logits, req_id, logit_edit_row, logprob_spec
+@@ -999,7 +1085,7 @@ class MlxModelRunner:
+                     lazy_logprobs=lazy_logprobs,
+                 )
+         else:
+-            cache = self._acquire_cache()
++            cache = self._acquire_cache(len(run_token_ids))
+             pool_backed_attention = False
+ 
+         if run_token_ids:
+@@ -1028,9 +1114,11 @@ class MlxModelRunner:
+                 c.offset = max(c.offset - 1, 0)
+ 
+         input_ids = mx.array([extend_tokens], dtype=mx.int32)
++        profile_model = time.perf_counter() if profile else 0.0
+         lazy_token, lazy_logprobs = self._forward_lazy_token(
+             input_ids, cache, needs_logits, req_id, logit_edit_row, logprob_spec
+         )
++        profile_materialize = time.perf_counter() if profile else 0.0
+ 
+         if track_len is not None and track_len == prefix_len + new_token_count:
+             self._store_tracked_auxiliary_state(req, cache, track_len)
+@@ -1038,11 +1126,42 @@ class MlxModelRunner:
+         # Convert pool-backed attention KV to contiguous attention KV for decode.
+         # This appends a lazy slice-assign onto the forward graph; the
+         # arrays get materialised when the caller evaluates lazy_token.
++        compact = False
+         if pool_backed_attention:
+-            cache = self._materialize_pool_backed_attention(cache)
++            compact = (
++                (
++                    prefer_compact_prefill
++                    or pool_writes is not None
++                    or self._compact_warm_prefill
++                )
++                and self._last_position_head is not None
++                and not self._cache_layout.has_auxiliary_state
++                and prefix_len >= 256 and 0 < new_token_count <= 32
++                and needs_logits
++            )
++            if compact:
++                cache = self._materialize_pool_backed_attention(cache, compact=True)
++                if self._memory_budget:
++                    logger.info("CINFER_COMPACT_PREFILL prefix=%d tail=%d",
++                                prefix_len, new_token_count)
++            else:
++                cache = self._materialize_pool_backed_attention(cache)
+ 
++        profile_write = time.perf_counter() if profile else 0.0
+         if new_slot_ids:
+-            self._sync_new_kv_to_pool(cache, prefix_len, new_slot_ids)
++            if pool_writes is None:
++                self._sync_new_kv_to_pool(cache, prefix_len, new_slot_ids)
++            else:
++                pool_writes.append((cache, prefix_len, new_slot_ids))
++        if profile:
++            logger.info(
++                "CINFER_PREFILL_DETAIL prefix=%d tail=%d setup_ms=%.3f "
++                "model_graph_ms=%.3f cache_graph_ms=%.3f write_graph_ms=%.3f",
++                prefix_len, len(new_token_ids), (profile_model - profile_start) * 1000,
++                (profile_materialize - profile_model) * 1000,
++                (profile_write - profile_materialize) * 1000,
++                (time.perf_counter() - profile_write) * 1000,
++            )
+ 
+         return MlxPendingPrefill(
+             lazy_token=lazy_token,
+@@ -1052,8 +1171,39 @@ class MlxModelRunner:
+             req_pool_idx=req_pool_idx,
+             synced_offset=prefix_len + len(new_slot_ids),
+             lazy_logprobs=lazy_logprobs,
++            cache_in_token_graph=compact,
+         )
+ 
++    def commit_prefill_pool_writes(
++        self, writes: list[tuple[list[Any], int, list[int]]]
++    ) -> None:
++        """Write the new, disjoint suffixes of an admitted prefill batch."""
++        if not writes:
++            return
++        if len(writes) == 1:
++            self._sync_new_kv_to_pool(*writes[0])
++            return
++        assert self._attention_kv_pool is not None
++        # Existing prefix slots belong to earlier batches and stay read-only.
++        # Each request was allocated new slots before any model forward began.
++        slots = mx.array([slot for _, _, ids in writes for slot in ids], dtype=mx.int32)
++        for pool_index, layer_index in enumerate(
++            self._cache_layout.full_attention_layer_indices
++        ):
++            keys, values = [], []
++            for cache, start, ids in writes:
++                layer = cache[layer_index]
++                end = start + len(ids)
++                keys.append(layer.keys[0, :, start:end, :].transpose(1, 0, 2))
++                values.append(layer.values[0, :, start:end, :].transpose(1, 0, 2))
++            self._attention_kv_pool.set_kv(
++                pool_index, slots, mx.concatenate(keys), mx.concatenate(values)
++            )
++        if self._memory_budget:
++            logger.info(
++                "CINFER_COALESCED_PREFILL batch=%d slots=%d", len(writes), slots.size
++            )
++
+     def prefill_finalize(self, pending: MlxPendingPrefill) -> int:
+         """Materialise a pending prefill and commit per-request state.
+ 
+@@ -1166,8 +1316,14 @@ class MlxModelRunner:
+             model_output = self.model(input_ids, cache=cache)
+             logits = self._extract_logits(model_output)
+             return mx.argmax(logits[:, -1, :], axis=-1), None
+-        model_output = self.model(input_ids, cache=cache)
+-        logits = self._extract_logits(model_output)
++        if self._last_position_head is not None and input_ids.shape[-1] > 1:
++            # Qwen3's vocabulary projection is token-wise; the scheduler
++            # already discards the logits from all but the last position.
++            hidden = self._trunk_forward(input_ids, cache)
++            logits = self._last_position_head(hidden[:, -1:, :])
++        else:
++            model_output = self.model(input_ids, cache=cache)
++            logits = self._extract_logits(model_output)
+         edits = logit_edit_row[None, :] if logit_edit_row is not None else None
+         return self._select_tokens_with_logprobs(
+             logits[:, -1, :], [req_id], [cache], edits, logprob_spec
+@@ -1693,6 +1849,11 @@ class MlxModelRunner:
+             self._release_cache(cache)
+         self._req_pool_idx.pop(req_id, None)
+         self._req_synced_offset.pop(req_id, None)
++        if self._memory_budget:
++            peak = mx.get_peak_memory()
++            if peak > self._reported_peak:
++                self._reported_peak = peak
++                logger.info("CINFER_MLX_PEAK bytes=%d", peak)
+ 
+     def clear(self):
+         """Clear all request states."""
+diff --git a/python/sglang/srt/hardware_backend/mlx/scheduler_mixin.py b/python/sglang/srt/hardware_backend/mlx/scheduler_mixin.py
+index 187f140..7eb1235 100644
+--- a/python/sglang/srt/hardware_backend/mlx/scheduler_mixin.py
++++ b/python/sglang/srt/hardware_backend/mlx/scheduler_mixin.py
+@@ -1,3 +1,4 @@
++# Modified by the 云清启 technical team for the MLX prefix-cache benchmark.
+ """MLX overlap scheduling mixin for the SGLang scheduler.
+ 
+ Provides ``event_loop_overlap_mlx``, which pipelines MLX forward
+@@ -16,6 +17,7 @@ the GPU runs both steps back-to-back with no idle gap.
+ from __future__ import annotations
+ 
+ import logging
++import os
+ import time
+ from dataclasses import dataclass, replace
+ from typing import TYPE_CHECKING, List, Optional
+@@ -28,6 +30,7 @@ from sglang.srt.runtime_context import get_device
+ from sglang.srt.utils import DynamicGradMode
+ 
+ logger = logging.getLogger(__name__)
++_PROFILE_EXTEND = os.environ.get("CINFER_PROFILE_EXTEND") == "1"
+ 
+ if TYPE_CHECKING:
+     from sglang.srt.hardware_backend.mlx.tp_worker import MlxLaunch
+@@ -68,6 +71,7 @@ class MlxPendingJob:
+     # before output processing).
+     extend_input_len_per_req: Optional[List[int]] = None
+     extend_logprob_start_len_per_req: Optional[List[int]] = None
++    profile_launch: Optional[tuple[float, float, list, list, list]] = None
+ 
+ 
+ class SchedulerMlxOverlapMixin:
+@@ -103,7 +107,18 @@ class SchedulerMlxOverlapMixin:
+         self.profiler_manager._profile_batch_predicate(batch)
+ 
+     def _finalize_mlx_pending_job(self: Scheduler, pending: MlxPendingJob):
++        before_finalize = time.perf_counter() if pending.profile_launch else 0.0
+         result = self.tp_worker.finalize_mlx_result(pending.launch, pending.reqs)
++        if pending.profile_launch:
++            start, launched, prefixes, extends, queues = pending.profile_launch
++            completed = time.perf_counter()
++            logger.info(
++                "CINFER_EXTEND batch=%s prefixes=%s tails=%s queue_ms=%s "
++                "build_ms=%.3f finalize_ms=%.3f forward_ms=%.3f",
++                len(prefixes), prefixes, extends, queues,
++                (launched - start) * 1000, (completed - before_finalize) * 1000,
++                (completed - start) * 1000,
++            )
+         result.extend_input_len_per_req = pending.extend_input_len_per_req
+         result.extend_logprob_start_len_per_req = (
+             pending.extend_logprob_start_len_per_req
+@@ -161,6 +176,8 @@ class SchedulerMlxOverlapMixin:
+         """
+ 
+         def _launch_fresh(batch: ScheduleBatch) -> MlxPendingJob:
++            profile = _PROFILE_EXTEND and batch.forward_mode.is_extend()
++            profile_start = time.perf_counter() if profile else 0.0
+             self._prepare_mlx_launch(batch)
+             # Materialize batch.input_ids from CPU staging (prefill) or the
+             # FutureMap relay (decode) before the forward. With deferred input
+@@ -169,7 +186,26 @@ class SchedulerMlxOverlapMixin:
+             # loop must do it too, otherwise async_forward_batch_generation_mlx
+             # dereferences a None input_ids.
+             resolve_forward_inputs(batch, self.future_map)
+-            launch = self.tp_worker.async_forward_batch_generation_mlx(batch)
++            # A singleton may be the first admission of a concurrent burst.
++            # Overlapping requests can be waiting or still decoding.
++            prefill_has_peers = batch.forward_mode.is_extend() and (
++                bool(self.waiting_queue)
++                or any(not req.finished() for req in self.running_batch.reqs)
++            )
++            launch = self.tp_worker.async_forward_batch_generation_mlx(
++                batch, prefill_has_peers=prefill_has_peers
++            )
++            timing = None
++            if profile:
++                timing = (
++                    profile_start, time.perf_counter(),
++                    [r.prefix_len for r in batch.reqs], list(batch.extend_lens),
++                    [
++                        round((profile_start - r.time_stats.wait_queue_entry_time) * 1000, 3)
++                        if r.time_stats.wait_queue_entry_time else None
++                        for r in batch.reqs
++                    ],
++                )
+             extend_input_len_per_req = None
+             extend_logprob_start_len_per_req = None
+             if batch.return_logprob:
+@@ -186,6 +222,7 @@ class SchedulerMlxOverlapMixin:
+                 chain_safe=self._mlx_batch_chain_safe(batch),
+                 extend_input_len_per_req=extend_input_len_per_req,
+                 extend_logprob_start_len_per_req=extend_logprob_start_len_per_req,
++                profile_launch=timing,
+             )
+ 
+         def _launch_chained(prev: MlxPendingJob) -> MlxPendingJob:
+diff --git a/python/sglang/srt/hardware_backend/mlx/tp_worker.py b/python/sglang/srt/hardware_backend/mlx/tp_worker.py
+index fad0aaa..6cc0cb7 100644
+--- a/python/sglang/srt/hardware_backend/mlx/tp_worker.py
++++ b/python/sglang/srt/hardware_backend/mlx/tp_worker.py
+@@ -1,3 +1,4 @@
++# Modified by the 云清启 technical team for the MLX prefix-cache benchmark.
+ """MLX-specific TpModelWorker subclass for Apple Silicon.
+ 
+ Routes forward passes through the MLX model runner, bypassing PyTorch
+@@ -13,6 +14,8 @@ normal ``GenerationBatchResult``.
+ """
+ 
+ import logging
++import os
++import time
+ from dataclasses import dataclass
+ from typing import Optional
+ 
+@@ -46,6 +49,7 @@ from sglang.srt.runtime_context import (
+ )
+ 
+ logger = logging.getLogger(__name__)
++_PROFILE_EXTEND = os.environ.get("CINFER_PROFILE_EXTEND") == "1"
+ 
+ 
+ @dataclass
+@@ -417,7 +421,9 @@ class MlxTpModelWorker(TpModelWorker):
+             return None
+         return mx.stack([edit_rows[rid] for rid in req_ids])
+ 
+-    def async_forward_batch_generation_mlx(self, batch: ScheduleBatch) -> MlxLaunch:
++    def async_forward_batch_generation_mlx(
++        self, batch: ScheduleBatch, *, prefill_has_peers: bool = False
++    ) -> MlxLaunch:
+         """Start an async (lazy) forward pass through the MLX model runner.
+ 
+         See :class:`MlxLaunch` for the returned fields.  The caller must
+@@ -460,13 +466,15 @@ class MlxTpModelWorker(TpModelWorker):
+             )
+ 
+         if forward_mode.is_extend():
+-            return self._async_extend_batch(batch)
++            return self._async_extend_batch(batch, prefill_has_peers=prefill_has_peers)
+ 
+         raise ValueError(
+             f"MLX async runner does not support forward mode: {forward_mode}"
+         )
+ 
+-    def _async_extend_batch(self, batch: ScheduleBatch) -> MlxLaunch:
++    def _async_extend_batch(
++        self, batch: ScheduleBatch, *, prefill_has_peers: bool = False
++    ) -> MlxLaunch:
+         """Launch each request in an EXTEND batch lazily and kick GPU work."""
+         reqs = batch.reqs
+         input_ids_cpu = batch.input_ids.cpu().tolist()
+@@ -483,6 +491,24 @@ class MlxTpModelWorker(TpModelWorker):
+         # Genuine decode steps mixed into this extend batch; see
+         # _route_extend_request.
+         decoding_rids = {r.rid for r in (batch.decoding_reqs or [])}
++        # Existing radix prefixes remain immutable while disjoint new suffixes
++        # are built. Leave mixed decode and retraction on their usual routes.
++        coalesce = (
++            self._mlx_runner.coalesce_prefill_writes
++            and len(reqs) > 1
++            and not decoding_rids
++            and all(
++                req.prefix_len >= 256
++                and 0 < length <= 32
++                and self._chunk_needs_logits(req)
++                and self._route_extend_request(req.rid, decoding_rids) == "prefill"
++                for req, length in zip(reqs, extend_seq_lens)
++            )
++        )
++        pool_writes = [] if coalesce else None
++        prefer_compact_prefill = (
++            prefill_has_peers and self._mlx_runner.coalesce_prefill_writes
++        )
+ 
+         for i, req in enumerate(reqs):
+             seq_len = extend_seq_lens[i]
+@@ -530,9 +556,14 @@ class MlxTpModelWorker(TpModelWorker):
+                         needs_logits=self._chunk_needs_logits(req),
+                         logit_edit_row=edit_rows[req.rid] if edit_rows else None,
+                         logprob_spec=self._logprob_spec_for(logprob_rows, [req.rid]),
++                        pool_writes=pool_writes,
++                        prefer_compact_prefill=prefer_compact_prefill,
+                     )
+                 )
+ 
++        if pool_writes:
++            self._mlx_runner.commit_prefill_pool_writes(pool_writes)
++
+         pending_mixed_decode: Optional[MlxPendingDecode] = None
+         if mixed_decode_rids:
+             pending_mixed_decode = self._mlx_runner.decode_batch_start(
+@@ -542,10 +573,8 @@ class MlxTpModelWorker(TpModelWorker):
+             )
+ 
+         # Stack lazy tokens so the caller has a single handle to evaluate
+-        # after CPU scheduling work.  We also hand every cache buffer
+-        # (and the decode cache arrays) to mx.async_eval so the GPU
+-        # kernel-launch stream sees everything the next step depends on
+-        # before we actually block on anything.
++        # after CPU scheduling work. Submit cache buffers that the token
++        # graph does not already evaluate before blocking on the result.
+         prefill_ext_tokens: list[mx.array] = [p.lazy_token for p in pending_prefills]
+         prefill_ext_tokens.extend(e.lazy_token for e in pending_extends)
+ 
+@@ -556,7 +585,11 @@ class MlxTpModelWorker(TpModelWorker):
+         else:
+             lazy_stacked = None
+ 
+-        for pending in (*pending_prefills, *pending_extends):
++        for pending in pending_prefills:
++            if not pending.cache_in_token_graph:
++                async_args.extend(self._mlx_runner.cache_state_arrays([pending.cache]))
++            async_args.extend(lazy_logprob_arrays(pending.lazy_logprobs))
++        for pending in pending_extends:
+             async_args.extend(self._mlx_runner.cache_state_arrays([pending.cache]))
+             async_args.extend(lazy_logprob_arrays(pending.lazy_logprobs))
+         if pending_mixed_decode is not None:
+@@ -567,7 +600,11 @@ class MlxTpModelWorker(TpModelWorker):
+             )
+ 
+         if async_args:
++            evaluation_started = time.perf_counter() if _PROFILE_EXTEND else 0.0
+             mx.async_eval(*async_args)
++            if _PROFILE_EXTEND:
++                logger.info("CINFER_EXTEND_EVAL batch=%d enqueue_ms=%.3f",
++                            len(reqs), (time.perf_counter() - evaluation_started) * 1000)
+ 
+         return MlxLaunch(
+             lazy_tokens=lazy_stacked,
+diff --git a/test/registered/unit/hardware_backend/mlx/test_attention_patching.py b/test/registered/unit/hardware_backend/mlx/test_attention_patching.py
+index 2fba5de..ff0bf04 100644
+--- a/test/registered/unit/hardware_backend/mlx/test_attention_patching.py
++++ b/test/registered/unit/hardware_backend/mlx/test_attention_patching.py
+@@ -1,3 +1,4 @@
++# Modified by the 云清启 technical team for the MLX prefix-cache benchmark.
+ """Unit tests for MLX attention discovery and generic cache handling."""
+ 
+ from __future__ import annotations
+@@ -1142,6 +1143,7 @@ class TestMlxOverlapScheduler(unittest.TestCase):
+         # (deferred input materialization) before launching the forward.
+         # Without resolve_forward_inputs in _launch_fresh, input_ids stays
+         # None and async_forward_batch_generation_mlx dereferences a None.
++        from sglang.srt.model_executor.forward_batch_info import ForwardMode
+         from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+ 
+         class _StopLoop(Exception):
+@@ -1149,7 +1151,8 @@ class TestMlxOverlapScheduler(unittest.TestCase):
+ 
+         captured = {}
+ 
+-        def fake_forward(batch):
++        def fake_forward(batch, *, prefill_has_peers):
++            self.assertFalse(prefill_has_peers)
+             captured["input_ids"] = batch.input_ids
+             raise _StopLoop
+ 
+@@ -1167,7 +1170,7 @@ class TestMlxOverlapScheduler(unittest.TestCase):
+         scheduler.future_map = SimpleNamespace()
+         scheduler.cur_batch_for_debug = None
+         scheduler.last_batch = None
+-        scheduler.running_batch = None
++        scheduler.running_batch = SimpleNamespace(reqs=[])
+         scheduler.tp_worker = SimpleNamespace(
+             async_forward_batch_generation_mlx=fake_forward
+         )
+@@ -1179,6 +1182,7 @@ class TestMlxOverlapScheduler(unittest.TestCase):
+             enable_overlap=True,
+             spec_algorithm=SpeculativeAlgorithm.NONE,
+             device="cpu",
++            forward_mode=ForwardMode.EXTEND,
+         )
+         scheduler.get_next_batch_to_run = lambda running_batch, last_batch: (
+             SimpleNamespace(batch_to_run=batch, running_batch=running_batch)
+diff --git a/test/registered/unit/hardware_backend/mlx/test_scheduler_mixin.py b/test/registered/unit/hardware_backend/mlx/test_scheduler_mixin.py
+index 234fa0b..4e09de9 100644
+--- a/test/registered/unit/hardware_backend/mlx/test_scheduler_mixin.py
++++ b/test/registered/unit/hardware_backend/mlx/test_scheduler_mixin.py
+@@ -1,3 +1,4 @@
++# Modified by the 云清启 technical team for the MLX prefix-cache benchmark.
+ """Unit tests for the MLX overlap scheduler mixin (hardware_backend/mlx/scheduler_mixin.py).
+ 
+ Covers:
+@@ -78,6 +79,7 @@ class TestMlxLaunchBookkeeping(unittest.TestCase):
+ 
+         scheduler = self._make_scheduler()
+         pending = MagicMock()
++        pending.profile_launch = None
+ 
+         SchedulerMlxOverlapMixin._prepare_mlx_launch(scheduler, pending.batch_copy)
+         SchedulerMlxOverlapMixin._finalize_mlx_pending_job(scheduler, pending)
+@@ -149,7 +151,7 @@ class TestOverlapLoopStampsLaunchTs(unittest.TestCase):
+         plan.batch_to_run = batch
+         scheduler.get_next_batch_to_run.return_value = plan
+         scheduler.tp_worker.async_forward_batch_generation_mlx.side_effect = (
+-            lambda _batch: (
++            lambda _batch, **_: (
+                 events.append("forward"),
+                 MlxLaunch(
+                     lazy_tokens=None,
+@@ -392,7 +394,7 @@ class TestRetractPauseDrainsInflightJob(unittest.TestCase):
+ 
+         scheduler.get_next_batch_to_run.side_effect = get_next_batch_to_run
+         # A decode launch without a chainable handle: one job in flight.
+-        scheduler.tp_worker.async_forward_batch_generation_mlx.side_effect = lambda b: (
++        scheduler.tp_worker.async_forward_batch_generation_mlx.side_effect = lambda b, **_: (
+             events.append(("launch", [r.rid for r in b.reqs])),
+             MlxLaunch(
+                 lazy_tokens=None,
+diff --git a/test/registered/unit/hardware_backend/mlx/test_tp_worker_routing.py b/test/registered/unit/hardware_backend/mlx/test_tp_worker_routing.py
+index bc8621c..7d0af84 100644
+--- a/test/registered/unit/hardware_backend/mlx/test_tp_worker_routing.py
++++ b/test/registered/unit/hardware_backend/mlx/test_tp_worker_routing.py
+@@ -1,3 +1,4 @@
++# Modified by the 云清启 technical team for the MLX prefix-cache benchmark.
+ """Unit tests for MLX extend-batch request routing in ``MlxTpModelWorker``.
+ 
+ Regression guard for the single-token chunked-prefill continuation bug: a
+@@ -58,6 +59,8 @@ class _FakeRunner:
+     """Records which routing path each request took (both worker paths
+     drive the runner through the same start/finalize surface)."""
+ 
++    coalesce_prefill_writes = False
++
+     def __init__(self, known_rids):
+         self._known = set(known_rids)
+         self.calls: list[tuple[str, str]] = []  # (op, rid)
+@@ -65,6 +68,7 @@ class _FakeRunner:
+         # chunk-finality derivation reaching the runner intact.
+         self.logits_flags: dict[tuple[str, str], bool] = {}
+         self.prefix_slot_ids: dict[str, list[int]] = {}
++        self.compact_prefill_flags: dict[str, bool] = {}
+         self._req_caches: dict[str, list] = {}
+         self._counter = 0
+ 
+@@ -119,17 +123,21 @@ class _FakeRunner:
+         needs_logits=True,
+         logit_edit_row=None,
+         logprob_spec=None,
++        pool_writes=None,
++        prefer_compact_prefill=False,
+     ):
+         import mlx.core as mx
+ 
+         self.calls.append(("prefill_start", req_id))
+         self.logits_flags[("prefill_start", req_id)] = needs_logits
+         self.prefix_slot_ids[req_id] = list(prefix_slot_ids)
++        self.compact_prefill_flags[req_id] = prefer_compact_prefill
+         return SimpleNamespace(
+             lazy_token=mx.array([0], dtype=mx.int32),
+             cache=[self._fake_cache_layer()],
+             req_id=req_id,
+             lazy_logprobs=None,
++            cache_in_token_graph=False,
+         )
+ 
+     def decode_batch_start(
+@@ -354,6 +362,16 @@ class TestMlxExtendRouting(CustomTestCase):
+         worker._async_extend_batch(batch)
+         self.assertEqual(worker._mlx_runner.prefix_slot_ids["r1"], [11, 12, 13])
+ 
++    def test_single_prefill_uses_compact_hint_only_with_concurrent_peers(self):
++        for has_peers in (False, True):
++            with self.subTest(has_peers=has_peers):
++                worker = self._worker(known_rids=set())
++                worker._mlx_runner.coalesce_prefill_writes = True
++                req = _FakeReq("r1")
++                batch = _FakeBatch(ForwardMode.EXTEND, [req], [1])
++                worker._async_extend_batch(batch, prefill_has_peers=has_peers)
++                self.assertEqual(worker._mlx_runner.compact_prefill_flags["r1"], has_peers)
++
+     def test_async_genuine_mixed_decode_routes_to_decode(self):
+         p, d = _FakeReq("p1"), _FakeReq("d1")
+         runner, launch = self._run_async([p, d], [4, 1], {"d1"}, [d], ForwardMode.MIXED)

@@ -1,0 +1,32 @@
+CINFER_MEMORY_GUIDELINE bytes=6442450944
+CINFER_READOUT enabled=True
+CINFER_EXTEND_EVAL batch=1 enqueue_ms=16.205
+CINFER_EXTEND batch=1 prefixes=[0] tails=[6] queue_ms=[0.834] build_ms=17.652 finalize_ms=6.708 forward_ms=24.507
+Cache flushed successfully!
+CINFER_EXTEND_EVAL batch=1 enqueue_ms=7.578
+CINFER_EXTEND batch=1 prefixes=[0] tails=[20] queue_ms=[0.439] build_ms=8.480 finalize_ms=5.257 forward_ms=13.862
+CINFER_MLX_PEAK bytes=511164704
+CINFER_EXTEND_EVAL batch=1 enqueue_ms=459.875
+CINFER_EXTEND batch=1 prefixes=[1] tails=[2048] queue_ms=[0.403] build_ms=461.133 finalize_ms=55.819 forward_ms=517.118
+CINFER_EXTEND_EVAL batch=1 enqueue_ms=32.113
+CINFER_EXTEND batch=1 prefixes=[2049] tails=[352] queue_ms=[518.184] build_ms=34.436 finalize_ms=85.074 forward_ms=119.672
+CINFER_MLX_PEAK bytes=2344124700
+CINFER_PREFILL_DETAIL prefix=2389 tail=12 setup_ms=0.062 model_graph_ms=0.616 cache_graph_ms=0.369 write_graph_ms=0.102
+CINFER_EXTEND_EVAL batch=1 enqueue_ms=27.337
+CINFER_EXTEND batch=1 prefixes=[2389] tails=[12] queue_ms=[0.484] build_ms=28.910 finalize_ms=3.899 forward_ms=33.529
+CINFER_GROUP_PREFILL batch=3 prefix=2390 tail=11
+CINFER_EXTEND_EVAL batch=3 enqueue_ms=119.294
+CINFER_EXTEND batch=3 prefixes=[2390, 2390, 2390] tails=[11, 11, 11] queue_ms=[5.042, 5.011, 4.98] build_ms=121.758 finalize_ms=0.316 forward_ms=122.355
+CINFER_MLX_PEAK bytes=3683493342
+CINFER_GROUP_PREFILL batch=4 prefix=2390 tail=11
+CINFER_EXTEND_EVAL batch=4 enqueue_ms=67.255
+CINFER_EXTEND batch=4 prefixes=[2390, 2390, 2390, 2390] tails=[11, 11, 11, 11] queue_ms=[0.637, 0.612, 0.596, 0.58] build_ms=69.706 finalize_ms=4.004 forward_ms=73.968
+CINFER_MLX_PEAK bytes=4941504564
+CINFER_MLX_PEAK bytes=5658066984
+CINFER_GROUP_PREFILL batch=2 prefix=2390 tail=11
+CINFER_EXTEND_EVAL batch=2 enqueue_ms=36.741
+CINFER_EXTEND batch=2 prefixes=[2390, 2390] tails=[11, 11] queue_ms=[5.651, 5.624] build_ms=38.166 finalize_ms=3.060 forward_ms=41.684
+CINFER_GROUP_PREFILL batch=2 prefix=2390 tail=11
+CINFER_EXTEND_EVAL batch=2 enqueue_ms=36.193
+CINFER_EXTEND batch=2 prefixes=[2390, 2390] tails=[11, 11] queue_ms=[4.355, 4.328] build_ms=37.860 finalize_ms=3.490 forward_ms=41.621
+Cache flushed successfully!
